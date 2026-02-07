@@ -1,0 +1,875 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>CherrybombOS</title>
+    <style>
+        body {
+            background-color: #1a0505;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            margin: 0;
+            color: #eee;
+            font-family: 'Courier New', Courier, monospace;
+        }
+        canvas {
+            background-color: #000;
+            box-shadow: 0 0 20px #ff000040;
+            cursor: none; /* We will draw our own cursor */
+            image-rendering: pixelated;
+        }
+        .instructions {
+            margin-top: 10px;
+            text-align: center;
+            color: #ff6666;
+        }
+    </style>
+</head>
+<body>
+
+    <canvas id="gameCanvas" width="640" height="480"></canvas>
+    <div class="instructions">
+        <p><strong>CherrybombOS v1.0</strong></p>
+        <p>Mouse to navigate. Double-click icons. Drag windows.</p>
+    </div>
+
+<script>
+/**
+ * CherrybombOS
+ * A simulated Operating System inside a canvas.
+ */
+
+// ==========================================
+// 1. UTILITY CLASSES
+// ==========================================
+
+class Vector2 {
+    constructor(x, y) {
+        this.x = x;
+        this.y = y;
+    }
+}
+
+class InputManager {
+    constructor(canvas) {
+        this.canvas = canvas;
+        this.mouse = new Vector2(0, 0);
+        this.isMouseDown = false;
+        this.clickFrame = false; // True only on the frame the mouse was pressed
+        this.lastClickTime = 0;
+        this.doubleClickFrame = false;
+
+        const rect = canvas.getBoundingClientRect();
+
+        canvas.addEventListener('mousemove', (e) => {
+            const rect = canvas.getBoundingClientRect();
+            this.mouse.x = e.clientX - rect.left;
+            this.mouse.y = e.clientY - rect.top;
+        });
+
+        canvas.addEventListener('mousedown', () => {
+            this.isMouseDown = true;
+            this.clickFrame = true;
+            
+            const now = Date.now();
+            if (now - this.lastClickTime < 300) {
+                this.doubleClickFrame = true;
+            }
+            this.lastClickTime = now;
+        });
+
+        canvas.addEventListener('mouseup', () => {
+            this.isMouseDown = false;
+        });
+    }
+
+    update() {
+        // clickFrame and doubleClickFrame are reset manually by the Game loop after processing
+    }
+
+    resetFrame() {
+        this.clickFrame = false;
+        this.doubleClickFrame = false;
+    }
+}
+
+// ==========================================
+// 2. BASE UI OBJECT CLASS
+// ==========================================
+
+class UIElement {
+    constructor(x, y, width, height) {
+        this.pos = new Vector2(x, y);
+        this.width = width;
+        this.height = height;
+        this.hovered = false;
+    }
+
+    contains(point) {
+        return point.x >= this.pos.x && 
+               point.x <= this.pos.x + this.width && 
+               point.y >= this.pos.y && 
+               point.y <= this.pos.y + this.height;
+    }
+
+    update(dt, input) {
+        this.hovered = this.contains(input.mouse);
+    }
+
+    render(ctx) {}
+}
+
+// ==========================================
+// 3. GAME ENTITIES (OS COMPONENTS)
+// ==========================================
+
+class Icon extends UIElement {
+    constructor(x, y, label, appType, os) {
+        super(x, y, 64, 64);
+        this.label = label;
+        this.appType = appType;
+        this.os = os;
+        this.selected = false;
+    }
+
+    update(dt, input) {
+        super.update(dt, input);
+        
+        if (input.clickFrame && this.hovered) {
+            this.selected = true;
+        } else if (input.clickFrame && !this.hovered) {
+            this.selected = false;
+        }
+
+        if (input.doubleClickFrame && this.hovered) {
+            this.os.openWindow(this.appType);
+        }
+    }
+
+    render(ctx) {
+        // Selection highlight
+        if (this.selected) {
+            ctx.fillStyle = 'rgba(255, 255, 255, 0.2)';
+            ctx.fillRect(this.pos.x - 4, this.pos.y - 4, this.width + 8, this.height + 20);
+        }
+
+        // Draw Icon (Generic File or Specific)
+        ctx.fillStyle = '#ff3333';
+        ctx.fillRect(this.pos.x + 16, this.pos.y + 10, 32, 40);
+        ctx.fillStyle = '#aa0000';
+        ctx.fillRect(this.pos.x + 16, this.pos.y + 10, 32, 10); // Top fold
+
+        // Label
+        ctx.fillStyle = '#fff';
+        ctx.font = '12px Courier New';
+        ctx.textAlign = 'center';
+        ctx.fillText(this.label, this.pos.x + 32, this.pos.y + 70);
+    }
+}
+
+class Window extends UIElement {
+    constructor(x, y, width, height, title, contentApp) {
+        super(x, y, width, height);
+        this.title = title;
+        this.app = contentApp; // The application logic inside
+        this.isDragging = false;
+        this.dragOffset = new Vector2(0, 0);
+        this.closeBtnRect = { x: width - 20, y: 4, w: 16, h: 16 };
+        this.shouldClose = false;
+        
+        // Link app to this window
+        if (this.app) this.app.window = this;
+    }
+
+    update(dt, input) {
+        // Handle Dragging
+        if (this.isDragging) {
+            this.pos.x = input.mouse.x - this.dragOffset.x;
+            this.pos.y = input.mouse.y - this.dragOffset.y;
+            
+            // Keep on screen
+            if (this.pos.y < 0) this.pos.y = 0;
+            
+            if (!input.isMouseDown) {
+                this.isDragging = false;
+            }
+            return true; // Consume input
+        }
+
+        // Hit detection for interaction
+        if (input.clickFrame && this.contains(input.mouse)) {
+            // Check close button
+            const localMX = input.mouse.x - this.pos.x;
+            const localMY = input.mouse.y - this.pos.y;
+
+            if (localMX >= this.closeBtnRect.x && localMX <= this.closeBtnRect.x + this.closeBtnRect.w &&
+                localMY >= this.closeBtnRect.y && localMY <= this.closeBtnRect.y + this.closeBtnRect.h) {
+                this.shouldClose = true;
+                return true;
+            }
+
+            // Check Title Bar for Drag (Top 24 pixels)
+            if (localMY < 24) {
+                this.isDragging = true;
+                this.dragOffset.x = localMX;
+                this.dragOffset.y = localMY;
+                return true;
+            }
+        }
+
+        // Update App Content
+        if (this.app) {
+            // Offset mouse for app
+            const appInput = { ...input };
+            appInput.mouse = new Vector2(input.mouse.x - this.pos.x, input.mouse.y - (this.pos.y + 24));
+            // Adjust clickframe to only be true if inside content area
+            const inContent = appInput.mouse.x >= 0 && appInput.mouse.x <= this.width && appInput.mouse.y >= 0 && appInput.mouse.y <= this.height - 24;
+            if (!inContent) appInput.clickFrame = false;
+            
+            this.app.update(dt, appInput);
+        }
+
+        return this.contains(input.mouse) && input.clickFrame; // Return true if clicked to focus
+    }
+
+    render(ctx) {
+        // Drop shadow
+        ctx.fillStyle = 'rgba(0,0,0,0.5)';
+        ctx.fillRect(this.pos.x + 4, this.pos.y + 4, this.width, this.height);
+
+        // Main Body
+        ctx.fillStyle = '#2a2a2a';
+        ctx.fillRect(this.pos.x, this.pos.y, this.width, this.height);
+        
+        // Border
+        ctx.strokeStyle = '#ff3333';
+        ctx.lineWidth = 2;
+        ctx.strokeRect(this.pos.x, this.pos.y, this.width, this.height);
+
+        // Title Bar
+        ctx.fillStyle = '#ff3333';
+        ctx.fillRect(this.pos.x, this.pos.y, this.width, 24);
+
+        // Title Text
+        ctx.fillStyle = '#fff';
+        ctx.textAlign = 'left';
+        ctx.font = 'bold 14px Courier New';
+        ctx.fillText(this.title, this.pos.x + 6, this.pos.y + 17);
+
+        // Close Button
+        ctx.fillStyle = '#aa0000';
+        ctx.fillRect(this.pos.x + this.closeBtnRect.x, this.pos.y + this.closeBtnRect.y, this.closeBtnRect.w, this.closeBtnRect.h);
+        ctx.strokeStyle = '#fff';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(this.pos.x + this.closeBtnRect.x + 3, this.pos.y + this.closeBtnRect.y + 3);
+        ctx.lineTo(this.pos.x + this.closeBtnRect.x + 13, this.pos.y + this.closeBtnRect.y + 13);
+        ctx.moveTo(this.pos.x + this.closeBtnRect.x + 13, this.pos.y + this.closeBtnRect.y + 3);
+        ctx.lineTo(this.pos.x + this.closeBtnRect.x + 3, this.pos.y + this.closeBtnRect.y + 13);
+        ctx.stroke();
+
+        // Content Area
+        ctx.save();
+        ctx.translate(this.pos.x, this.pos.y + 24);
+        // Clip content
+        ctx.beginPath();
+        ctx.rect(0, 0, this.width, this.height - 24);
+        ctx.clip();
+        
+        if (this.app) {
+            this.app.render(ctx);
+        }
+        ctx.restore();
+    }
+}
+
+// ==========================================
+// 4. APPLICATIONS (APPS)
+// ==========================================
+
+class Application {
+    constructor() {}
+    update(dt, input) {}
+    render(ctx) {}
+}
+
+class TerminalApp extends Application {
+    constructor() {
+        super();
+        this.lines = [
+            "CherrybombOS [Version 1.0]",
+            "(c) 2023 Cherry Corp.",
+            "",
+            "admin@cherry:~$ "
+        ];
+        this.cursorBlink = 0;
+    }
+
+    update(dt, input) {
+        this.cursorBlink += dt;
+    }
+
+    render(ctx) {
+        ctx.fillStyle = '#000';
+        ctx.fillRect(0, 0, 400, 300);
+        
+        ctx.fillStyle = '#0f0';
+        ctx.font = '14px Courier New';
+        ctx.textAlign = 'left';
+        
+        for (let i = 0; i < this.lines.length; i++) {
+            ctx.fillText(this.lines[i], 10, 20 + (i * 16));
+        }
+
+        // Draw cursor
+        if (Math.floor(this.cursorBlink * 2) % 2 === 0) {
+            const lastLine = this.lines[this.lines.length - 1];
+            const width = ctx.measureText(lastLine).width;
+            ctx.fillRect(10 + width, 8 + ((this.lines.length - 1) * 16), 8, 14);
+        }
+    }
+}
+
+class MinesweeperApp extends Application {
+    constructor() {
+        super();
+        this.gridSize = 10;
+        this.cellSize = 25;
+        this.bombs = 15;
+        this.grid = []; // { bomb: bool, revealed: bool, flagged: bool, neighbors: int }
+        this.state = 'playing'; // playing, won, lost
+        this.initGame();
+    }
+
+    initGame() {
+        this.state = 'playing';
+        this.grid = [];
+        
+        // Init Grid
+        for(let y=0; y<this.gridSize; y++) {
+            let row = [];
+            for(let x=0; x<this.gridSize; x++) {
+                row.push({ bomb: false, revealed: false, flagged: false, neighbors: 0 });
+            }
+            this.grid.push(row);
+        }
+
+        // Place Bombs
+        let placed = 0;
+        while(placed < this.bombs) {
+            let x = Math.floor(Math.random() * this.gridSize);
+            let y = Math.floor(Math.random() * this.gridSize);
+            if(!this.grid[y][x].bomb) {
+                this.grid[y][x].bomb = true;
+                placed++;
+            }
+        }
+
+        // Calc Neighbors
+        for(let y=0; y<this.gridSize; y++) {
+            for(let x=0; x<this.gridSize; x++) {
+                if(!this.grid[y][x].bomb) {
+                    let count = 0;
+                    for(let dy=-1; dy<=1; dy++) {
+                        for(let dx=-1; dx<=1; dx++) {
+                            if(y+dy >= 0 && y+dy < this.gridSize && x+dx >= 0 && x+dx < this.gridSize) {
+                                if(this.grid[y+dy][x+dx].bomb) count++;
+                            }
+                        }
+                    }
+                    this.grid[y][x].neighbors = count;
+                }
+            }
+        }
+    }
+
+    update(dt, input) {
+        if (this.state !== 'playing') {
+            if (input.clickFrame) this.initGame();
+            return;
+        }
+
+        if (input.clickFrame) {
+            const gx = Math.floor(input.mouse.x / this.cellSize);
+            const gy = Math.floor(input.mouse.y / this.cellSize);
+
+            if (gx >= 0 && gx < this.gridSize && gy >= 0 && gy < this.gridSize) {
+                this.reveal(gx, gy);
+            }
+        }
+    }
+
+    reveal(x, y) {
+        const cell = this.grid[y][x];
+        if (cell.revealed || cell.flagged) return;
+
+        cell.revealed = true;
+
+        if (cell.bomb) {
+            this.state = 'lost';
+            // Reveal all
+            this.grid.forEach(row => row.forEach(c => c.revealed = true));
+        } else if (cell.neighbors === 0) {
+            // Flood fill
+            for(let dy=-1; dy<=1; dy++) {
+                for(let dx=-1; dx<=1; dx++) {
+                    if(y+dy >= 0 && y+dy < this.gridSize && x+dx >= 0 && x+dx < this.gridSize) {
+                        this.reveal(x+dx, y+dy);
+                    }
+                }
+            }
+        }
+
+        this.checkWin();
+    }
+
+    checkWin() {
+        if (this.state === 'lost') return;
+        let revealedCount = 0;
+        this.grid.forEach(row => row.forEach(c => { if(c.revealed) revealedCount++; }));
+        if (revealedCount === (this.gridSize * this.gridSize) - this.bombs) {
+            this.state = 'won';
+        }
+    }
+
+    render(ctx) {
+        ctx.fillStyle = '#888';
+        ctx.fillRect(0, 0, 300, 300);
+
+        // Draw Grid
+        for(let y=0; y<this.gridSize; y++) {
+            for(let x=0; x<this.gridSize; x++) {
+                const cell = this.grid[y][x];
+                const px = x * this.cellSize;
+                const py = y * this.cellSize;
+
+                if (!cell.revealed) {
+                    // Unrevealed style
+                    ctx.fillStyle = '#c0c0c0';
+                    ctx.fillRect(px + 1, py + 1, this.cellSize - 2, this.cellSize - 2);
+                    // 3D bevel
+                    ctx.fillStyle = '#fff';
+                    ctx.fillRect(px, py, this.cellSize, 2);
+                    ctx.fillRect(px, py, 2, this.cellSize);
+                    ctx.fillStyle = '#444';
+                    ctx.fillRect(px + this.cellSize - 2, py, 2, this.cellSize);
+                    ctx.fillRect(px, py + this.cellSize - 2, this.cellSize, 2);
+                } else {
+                    // Revealed
+                    ctx.fillStyle = '#999';
+                    ctx.fillRect(px, py, this.cellSize, this.cellSize);
+                    ctx.strokeStyle = '#777';
+                    ctx.strokeRect(px, py, this.cellSize, this.cellSize);
+
+                    if (cell.bomb) {
+                        ctx.fillStyle = '#000';
+                        ctx.beginPath();
+                        ctx.arc(px + this.cellSize/2, py + this.cellSize/2, 6, 0, Math.PI*2);
+                        ctx.fill();
+                        // Fuse
+                        ctx.strokeStyle = '#f00';
+                        ctx.beginPath();
+                        ctx.moveTo(px + this.cellSize/2, py + this.cellSize/2 - 6);
+                        ctx.lineTo(px + this.cellSize/2 + 3, py + 4);
+                        ctx.stroke();
+                    } else if (cell.neighbors > 0) {
+                        const colors = [null, 'blue', 'green', 'red', 'purple', 'maroon', 'turquoise', 'black', 'gray'];
+                        ctx.fillStyle = colors[cell.neighbors];
+                        ctx.font = 'bold 16px Courier New';
+                        ctx.textAlign = 'center';
+                        ctx.fillText(cell.neighbors, px + this.cellSize/2, py + 18);
+                    }
+                }
+            }
+        }
+
+        // UI Overlay
+        if (this.state === 'lost') {
+            ctx.fillStyle = 'rgba(255, 0, 0, 0.5)';
+            ctx.fillRect(0, 0, 300, 300);
+            ctx.fillStyle = '#fff';
+            ctx.font = '30px Courier New';
+            ctx.textAlign = 'center';
+            ctx.fillText("EXPLODED!", 125, 125);
+            ctx.font = '16px Courier New';
+            ctx.fillText("Click to restart", 125, 150);
+        } else if (this.state === 'won') {
+            ctx.fillStyle = 'rgba(0, 255, 0, 0.5)';
+            ctx.fillRect(0, 0, 300, 300);
+            ctx.fillStyle = '#fff';
+            ctx.font = '30px Courier New';
+            ctx.textAlign = 'center';
+            ctx.fillText("DEFUSED!", 125, 125);
+            ctx.font = '16px Courier New';
+            ctx.fillText("Click to restart", 125, 150);
+        }
+    }
+}
+
+class AboutApp extends Application {
+    render(ctx) {
+        ctx.fillStyle = '#fff';
+        ctx.fillRect(0, 0, 300, 200);
+        ctx.fillStyle = '#000';
+        ctx.font = '14px Courier New';
+        ctx.textAlign = 'center';
+        ctx.fillText("CherrybombOS", 150, 40);
+        
+        // Draw Logo
+        const cx = 150, cy = 90;
+        
+        // Stems
+        ctx.strokeStyle = '#00aa00';
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.moveTo(cx - 15, cy - 5);
+        ctx.bezierCurveTo(cx - 15, cy - 25, cx, cy - 25, cx, cy - 35); // Left stem
+        ctx.moveTo(cx + 15, cy - 5);
+        ctx.bezierCurveTo(cx + 15, cy - 25, cx, cy - 25, cx, cy - 35); // Right stem
+        ctx.stroke();
+
+        // Cherries (Bombs)
+        ctx.fillStyle = '#cc0000';
+        ctx.beginPath();
+        ctx.arc(cx - 15, cy, 12, 0, Math.PI * 2);
+        ctx.arc(cx + 15, cy, 12, 0, Math.PI * 2);
+        ctx.fill();
+
+        // Highlights
+        ctx.fillStyle = '#ff6666';
+        ctx.beginPath();
+        ctx.arc(cx - 18, cy - 4, 3, 0, Math.PI * 2);
+        ctx.arc(cx + 12, cy - 4, 3, 0, Math.PI * 2);
+        ctx.fill();
+
+        // Fuses
+        ctx.strokeStyle = '#aa8800';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(cx, cy - 35);
+        ctx.lineTo(cx + 5, cy - 45);
+        ctx.stroke();
+
+        // Spark
+        ctx.fillStyle = '#ffff00';
+        ctx.beginPath();
+        ctx.arc(cx + 5, cy - 45, 3, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.fillStyle = '#000';
+        ctx.fillText("Created by Cherrybomb Studios", 150, 150);
+        ctx.fillText("v1.0.0", 150, 170);
+    }
+}
+
+// ==========================================
+// 5. GAME MANAGER (OS MANAGER)
+// ==========================================
+
+class CherrybombOS {
+    constructor(canvas) {
+        this.canvas = canvas;
+        this.ctx = canvas.getContext('2d');
+        this.input = new InputManager(canvas);
+        
+        this.bootTime = 0;
+        this.booted = false;
+
+        this.windows = [];
+        this.icons = [];
+        this.particles = []; // For cursor effect
+
+        this.setupDesktop();
+    }
+
+    setupDesktop() {
+        // Create Desktop Icons
+        this.icons.push(new Icon(20, 20, "Terminal", "terminal", this));
+        this.icons.push(new Icon(20, 110, "Sweeper", "minesweeper", this));
+        this.icons.push(new Icon(20, 200, "About OS", "about", this));
+    }
+
+    openWindow(appType) {
+        let app, title, w = 300, h = 200;
+        
+        switch(appType) {
+            case 'terminal':
+                app = new TerminalApp();
+                title = "Terminal.exe";
+                w = 400; h = 300;
+                break;
+            case 'minesweeper':
+                app = new MinesweeperApp();
+                title = "Cherry Sweeper";
+                w = 270; h = 290; // Fit grid exactly
+                break;
+            case 'about':
+                app = new AboutApp();
+                title = "System Info";
+                w = 300; h = 200;
+                break;
+        }
+
+        if (app) {
+            const win = new Window(100 + (this.windows.length * 20), 50 + (this.windows.length * 20), w, h, title, app);
+            this.windows.push(win);
+        }
+    }
+
+    update(dt) {
+        // Boot sequence logic
+        if (!this.booted) {
+            this.bootTime += dt;
+            if (this.bootTime > 3) {
+                this.booted = true;
+                // Play startup sound (simulated visually)
+            }
+            return;
+        }
+
+        this.input.update();
+
+        // Update Icons
+        this.icons.forEach(icon => icon.update(dt, this.input));
+
+        // Update Windows (Reverse order for input handling to prioritize top windows)
+        let inputConsumed = false;
+        
+        // We iterate backwards to check the top-most window first for clicks
+        for (let i = this.windows.length - 1; i >= 0; i--) {
+            const win = this.windows[i];
+            
+            // If we haven't clicked something above yet, update with real input
+            // Otherwise update with no click input (so animations still run)
+            const winInput = inputConsumed ? { ...this.input, clickFrame: false, isMouseDown: false } : this.input;
+            
+            const consumed = win.update(dt, winInput);
+            
+            if (consumed) {
+                inputConsumed = true;
+                // Bring to front if clicked
+                if (this.input.clickFrame) {
+                    this.windows.splice(i, 1);
+                    this.windows.push(win);
+                    // Break loop as we modified array and handled the top click
+                    break; 
+                }
+            }
+        }
+
+        // Close windows marked for closure
+        this.windows = this.windows.filter(w => !w.shouldClose);
+
+        // Update Particles (Cursor trail)
+        if (this.input.mouse.x !== this.prevMouseX || this.input.mouse.y !== this.prevMouseY) {
+            this.particles.push({
+                x: this.input.mouse.x,
+                y: this.input.mouse.y,
+                life: 1.0
+            });
+        }
+        this.prevMouseX = this.input.mouse.x;
+        this.prevMouseY = this.input.mouse.y;
+
+        this.particles.forEach(p => p.life -= dt * 2);
+        this.particles = this.particles.filter(p => p.life > 0);
+
+        // Reset input frames at end of game loop
+        this.input.resetFrame();
+    }
+
+    render() {
+        // Clear screen
+        this.ctx.fillStyle = '#000';
+        this.ctx.fillRect(0, 0, 640, 480);
+
+        if (!this.booted) {
+            this.renderBootScreen();
+            return;
+        }
+
+        // 1. Desktop Background (Dark Red)
+        // Create a slight gradient
+        const grad = this.ctx.createLinearGradient(0, 0, 0, 480);
+        grad.addColorStop(0, '#400000');
+        grad.addColorStop(1, '#200000');
+        this.ctx.fillStyle = grad;
+        this.ctx.fillRect(0, 0, 640, 480);
+
+        // Logo removed from background as requested
+
+        // 2. Icons
+        this.icons.forEach(icon => icon.render(this.ctx));
+
+        // 3. Windows
+        this.windows.forEach(win => win.render(this.ctx));
+
+        // 4. Taskbar
+        this.renderTaskbar();
+
+        // 5. Cursor
+        this.renderCursor();
+    }
+
+    renderBootScreen() {
+        this.ctx.fillStyle = '#000';
+        this.ctx.fillRect(0, 0, 640, 480);
+        
+        this.ctx.fillStyle = '#ff3333';
+        this.ctx.font = '20px Courier New';
+        this.ctx.textAlign = 'left';
+        
+        const lines = [
+            "BIOS Check... OK",
+            "Loading Kernel... OK",
+            "Mounting File System... OK",
+            "Initializing CherrybombOS v1.0...",
+            "_"
+        ];
+
+        let visibleLines = Math.floor(this.bootTime * 2);
+        for(let i=0; i<Math.min(visibleLines, lines.length); i++) {
+            this.ctx.fillText(lines[i], 50, 50 + (i * 30));
+        }
+
+        // Loading bar
+        if (this.bootTime > 2) {
+            this.ctx.strokeStyle = '#ff3333';
+            this.ctx.strokeRect(220, 300, 200, 20);
+            this.ctx.fillStyle = '#ff3333';
+            let progress = Math.min((this.bootTime - 2) / 1, 1);
+            this.ctx.fillRect(222, 302, 196 * progress, 16);
+        }
+    }
+
+    renderLogo(x, y, scale) {
+        const s = scale / 50; // Base scale normalization
+        const ctx = this.ctx;
+
+        // Stems
+        ctx.strokeStyle = '#00aa00';
+        ctx.lineWidth = 4 * s;
+        ctx.beginPath();
+        ctx.moveTo(x - 20*s, y - 10*s);
+        ctx.bezierCurveTo(x - 20*s, y - 50*s, x, y - 50*s, x, y - 70*s);
+        ctx.moveTo(x + 20*s, y - 10*s);
+        ctx.bezierCurveTo(x + 20*s, y - 50*s, x, y - 50*s, x, y - 70*s);
+        ctx.stroke();
+
+        // Cherries
+        ctx.fillStyle = '#cc0000';
+        ctx.beginPath();
+        ctx.arc(x - 20*s, y, 25*s, 0, Math.PI*2);
+        ctx.arc(x + 20*s, y, 25*s, 0, Math.PI*2);
+        ctx.fill();
+
+        // Bomb Highlights
+        ctx.fillStyle = '#ff6666';
+        ctx.beginPath();
+        ctx.arc(x - 28*s, y - 8*s, 6*s, 0, Math.PI*2);
+        ctx.arc(x + 12*s, y - 8*s, 6*s, 0, Math.PI*2);
+        ctx.fill();
+
+        // Fuse Spark
+        if (Math.random() > 0.5) {
+            ctx.fillStyle = '#ffff00';
+            ctx.beginPath();
+            ctx.arc(x, y - 75*s, 5*s, 0, Math.PI*2);
+            ctx.fill();
+        }
+    }
+
+    renderTaskbar() {
+        const ctx = this.ctx;
+        // Bar
+        ctx.fillStyle = '#2a2a2a';
+        ctx.fillRect(0, 450, 640, 30);
+        ctx.strokeStyle = '#ff3333';
+        ctx.beginPath();
+        ctx.moveTo(0, 450);
+        ctx.lineTo(640, 450);
+        ctx.stroke();
+
+        // Start Button (Cherry)
+        ctx.fillStyle = '#400000';
+        ctx.fillRect(2, 452, 80, 26);
+        ctx.strokeStyle = '#ff3333';
+        ctx.strokeRect(2, 452, 80, 26);
+        
+        ctx.fillStyle = '#fff';
+        ctx.font = 'bold 14px Courier New';
+        ctx.textAlign = 'left';
+        ctx.fillText("START", 30, 470);
+        
+        // Small logo on button
+        ctx.fillStyle = 'red';
+        ctx.beginPath();
+        ctx.arc(15, 465, 6, 0, Math.PI*2);
+        ctx.fill();
+
+        // Clock
+        const now = new Date();
+        const timeStr = now.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
+        ctx.fillStyle = '#fff';
+        ctx.textAlign = 'right';
+        ctx.fillText(timeStr, 630, 470);
+    }
+
+    renderCursor() {
+        // Particles
+        this.ctx.fillStyle = '#ff0000';
+        this.particles.forEach(p => {
+            this.ctx.globalAlpha = p.life;
+            this.ctx.fillRect(p.x, p.y, 2, 2);
+        });
+        this.ctx.globalAlpha = 1.0;
+
+        const mx = this.input.mouse.x;
+        const my = this.input.mouse.y;
+
+        // Custom Cursor Drawing
+        this.ctx.fillStyle = '#fff';
+        this.ctx.strokeStyle = '#000';
+        this.ctx.lineWidth = 1;
+        
+        this.ctx.beginPath();
+        this.ctx.moveTo(mx, my);
+        this.ctx.lineTo(mx + 12, my + 12);
+        this.ctx.lineTo(mx + 6, my + 12);
+        this.ctx.lineTo(mx + 8, my + 18);
+        this.ctx.lineTo(mx + 5, my + 19);
+        this.ctx.lineTo(mx + 3, my + 13);
+        this.ctx.lineTo(mx, my + 16);
+        this.ctx.closePath();
+        this.ctx.fill();
+        this.ctx.stroke();
+    }
+}
+
+// ==========================================
+// 6. INITIALIZATION & LOOP
+// ==========================================
+
+const canvas = document.getElementById('gameCanvas');
+const os = new CherrybombOS(canvas);
+
+let lastTime = 0;
+
+function gameLoop(timestamp) {
+    const dt = (timestamp - lastTime) / 1000;
+    lastTime = timestamp;
+
+    os.update(dt);
+    os.render();
+
+    requestAnimationFrame(gameLoop);
+}
+
+requestAnimationFrame(gameLoop);
+
+</script>
+</body>
+</html>
